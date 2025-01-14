@@ -30,12 +30,21 @@ func main() {
 	fmt.Println("Connected to RabbitMQ")
 
 	////Declare and bind the game log queue
-	pubsub.DeclareAndBind(
-		conn,
-		routing.ExchangePerilTopic,
-		routing.GameLogSlug,
-		routing.GameLogSlug + ".*",
-		pubsub.SimpleQueueDurable)
+	// pubsub.DeclareAndBind(
+	// 	conn,
+	// 	routing.ExchangePerilTopic,
+	// 	routing.GameLogSlug,
+	// 	routing.GameLogSlug + ".*",
+	// 	pubsub.SimpleQueueDurable)
+
+	pubsub.SubscribeGob(
+		conn, 
+		routing.ExchangePerilTopic, 
+		routing.GameLogSlug, 
+		routing.GameLogSlug + ".*", 
+		pubsub.SimpleQueueDurable, 
+		handlerLog(),
+	)
 
 	for {
 		gamelogic.PrintServerHelp()
@@ -82,6 +91,14 @@ func main() {
 	// signalChan := make(chan os.Signal, 1)
 	// signal.Notify(signalChan, os.Interrupt)
 	// <-signalChan
+}
+
+func handlerLog() func(routing.GameLog) pubsub.Acktype {
+	return func(gl routing.GameLog) pubsub.Acktype {
+		defer fmt.Print("> ")
+		gamelogic.WriteLog(gl)
+		return pubsub.Ack
+	}
 }
 
 	

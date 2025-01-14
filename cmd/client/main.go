@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"strconv"
+	"time"
+
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
@@ -66,7 +69,19 @@ func main() {
 		routing.ArmyMovesPrefix+"."+username,
 		routing.ArmyMovesPrefix+".*",
 		pubsub.SimpleQueueTransient,
-		handleArmyMoves(gamestate),
+		handleArmyMoves(gamestate, channel),
+	)
+	if err != nil {
+		fmt.Println("Failed to subscribe to army_moves messages:", err)
+		return
+	}
+	err = pubsub.SubscribeJSON(
+		conn,
+		string(routing.ExchangePerilTopic),
+		string(routing.WarRecognitionsPrefix),
+		string(routing.WarRecognitionsPrefix+".*"),
+		pubsub.SimpleQueueDurable,
+		handlerWar(gamestate, channel),
 	)
 	for {
 		fmt.Print("> ")
@@ -103,7 +118,30 @@ func main() {
 		case "help":
 			gamelogic.PrintClientHelp()
 		case "spam":
-			fmt.Println("Spam is not allowed yet")
+			number, err := strconv.Atoi(words[1])
+			if err != nil {
+				fmt.Println("Invalid number:", words[1])
+				continue
+			}
+			fmt.Printf("Spamming %d messages\n", number)
+			for i := 0; i < number; i++ {
+				fmt.Print("---> ")
+				msg := gamelogic.GetMaliciousLog()
+				err := pubsub.PublishGob(
+					channel,
+					routing.ExchangePerilTopic,
+					routing.GameLogSlug+"."+username,
+					routing.GameLog{
+						CurrentTime: time.Now(),
+						Message:     msg,
+						Username:    username,
+					},
+				)
+				if err != nil {
+					fmt.Println("Failed to publish log message:", err)
+					return
+				}
+			}
 		case "quit":
 			gamelogic.PrintQuit()
 			return
@@ -122,13 +160,27 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 	}
 }
 
-func handleArmyMoves(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.Acktype {
+func handleArmyMoves(gs *gamelogic.GameState, ch *amqp.Channel) func(gamelogic.ArmyMove) pubsub.Acktype {
 	return func(am gamelogic.ArmyMove) pubsub.Acktype {
 		defer fmt.Print("> ")
 		mover := gs.HandleMove(am)
 		switch mover {
-		case gamelogic.MoveOutComeSafe, gamelogic.MoveOutcomeMakeWar:
-			
+		case gamelogic.MoveOutComeSafe:
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeMakeWar:
+			err := pubsub.PublishJSON(
+				ch, 
+				string(routing.ExchangePerilTopic), 
+				routing.WarRecognitionsPrefix + "." + am.Player.Username,
+				gamelogic.RecognitionOfWar{
+					Attacker: am.Player,
+					Defender: gs.GetPlayerSnap(),
+				},
+			)
+			if err != nil {
+				fmt.Println("Failed to publish war message:", err)
+				return pubsub.NackRequeue
+			}
 			return pubsub.Ack
 		case gamelogic.MoveOutcomeSamePlayer:
 			return pubsub.NackDiscard
@@ -136,5 +188,46 @@ func handleArmyMoves(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.Ac
 			return pubsub.NackDiscard
 		}
 
+	}
+}
+
+/**
+* This function is a handler for the war messages
+**/	
+func handlerWar(gs *gamelogic.GameState, ch *amqp.Channel) func(gamelogic.RecognitionOfWar) pubsub.Acktype {
+	return func(row gamelogic.RecognitionOfWar) pubsub.Acktype {
+		defer fmt.Print("> ")
+		warOutcome, _, _ := gs.HandleWar(row)
+
+		defer fmt.Print("---> ")
+		fmt.Print(warOutcome)
+		msg := ""
+		switch warOutcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			return pubsub.NackRequeue
+		case gamelogic.WarOutcomeNoUnits:
+			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeYouWon:
+			msg = fmt.Sprintf("%s won a war against %s", row.Attacker.Username, row.Defender.Username)
+		case gamelogic.WarOutcomeOpponentWon:
+			msg = fmt.Sprintf("%s won a war against %s", row.Defender.Username, row.Attacker.Username)
+		case gamelogic.WarOutcomeDraw:
+			msg = fmt.Sprintf("A war between %s and %s resulted in a draw", row.Attacker.Username, row.Defender.Username)
+		}
+		err := pubsub.PublishGob(
+			ch, 
+			routing.ExchangePerilTopic, 
+			routing.GameLogSlug + "." + row.Attacker.Username, 
+			routing.GameLog{
+				CurrentTime : time.Now(),
+				Message     : msg,
+				Username    : row.Attacker.Username,
+			},
+		)
+
+		if err != nil {
+			return pubsub.NackRequeue
+		}
+		return pubsub.Ack
 	}
 }
